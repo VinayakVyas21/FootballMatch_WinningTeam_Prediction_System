@@ -1,0 +1,688 @@
+# International Football Match Predictor - Code Explanation
+
+This document provides a detailed explanation of each function and core concept in the Football Prediction System codebase.
+
+## football_predictor.py
+
+### Imports and Setup
+
+```python
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+from datetime import datetime
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+import xgboost as xgb
+
+# Set random seed for reproducibility
+np.random.seed(42)
+```
+
+These lines import necessary libraries:
+- pandas and numpy for data manipulation
+- matplotlib and seaborn for visualization
+- sklearn for machine learning utilities
+- xgboost for the gradient boosting model
+- Setting a random seed ensures reproducible results
+
+### load_data Function
+
+```python
+def load_data(file_path, sample_size=None):
+    print("Loading data...")
+    df = pd.read_csv(file_path)
+    print(f"Loaded {len(df)} matches")
+    
+    # Option to use a smaller sample for faster processing
+    if sample_size and sample_size < len(df):
+        # Use more recent matches for better relevance
+        df = df.sort_values('date').tail(sample_size)
+        print(f"Using {sample_size} most recent matches for faster processing")
+    
+    return df
+```
+
+This function:
+1. Loads the CSV dataset from the specified file path
+2. Optionally takes a sample_size parameter to limit the number of matches processed
+3. If sample_size is provided, it sorts by date and takes the most recent matches
+4. Returns the loaded DataFrame
+
+### preprocess_data Function
+
+```python
+def preprocess_data(df):
+    print("Preprocessing data...")
+    
+    # Select only relevant columns
+    df = df[['date', 'home_team', 'away_team', 'home_score', 'away_score', 
+             'tournament', 'country', 'neutral']]
+    
+    # Convert date to datetime format
+    df['date'] = pd.to_datetime(df['date'])
+    
+    # Create result column
+    df['result'] = np.where(df['home_score'] > df['away_score'], 'Home Win',
+                   np.where(df['home_score'] == df['away_score'], 'Draw', 'Away Win'))
+    
+    # Convert neutral to boolean
+    df['neutral'] = df['neutral'].astype(bool)
+    
+    print(f"Data shape after preprocessing: {df.shape}")
+    return df
+```
+
+This function:
+1. Selects only the relevant columns from the dataset
+2. Converts the date column to datetime format for proper time-based operations
+3. Creates a new 'result' column with three categories: 'Home Win', 'Draw', or 'Away Win'
+4. Converts the 'neutral' column to boolean type
+5. Returns the preprocessed DataFrame
+
+### engineer_features Function
+
+```python
+def engineer_features(df):
+    print("Engineering features...")
+    
+    # Create a copy to avoid SettingWithCopyWarning
+    data = df.copy()
+    
+    # Sort by date
+    data = data.sort_values('date')
+    
+    # Encode categorical variables
+    label_encoders = {}
+    for col in ['home_team', 'away_team', 'tournament', 'country']:
+        le = LabelEncoder()
+        data[f'{col}_encoded'] = le.fit_transform(data[col])
+        label_encoders[col] = le
+    
+    # Calculate team statistics (simplified approach)
+    print("Calculating team statistics...")
+    
+    # Create dictionaries to store team stats
+    team_win_rates = {}
+    team_goal_scored_avg = {}
+    team_goal_conceded_avg = {}
+    
+    # Calculate overall stats for each team
+    unique_teams = set(data['home_team'].unique()) | set(data['away_team'].unique())
+    
+    for team in unique_teams:
+        # Get all matches for this team
+        home_matches = data[data['home_team'] == team]
+        away_matches = data[data['away_team'] == team]
+        
+        # Calculate win rate
+        home_wins = sum(home_matches['result'] == 'Home Win')
+        away_wins = sum(away_matches['result'] == 'Away Win')
+        total_matches = len(home_matches) + len(away_matches)
+        
+        if total_matches > 0:
+            win_rate = (home_wins + away_wins) / total_matches
+        else:
+            win_rate = 0.5  # Default
+        
+        # Calculate goal averages
+        if len(home_matches) > 0:
+            home_goals_scored_avg = home_matches['home_score'].mean()
+            home_goals_conceded_avg = home_matches['away_score'].mean()
+        else:
+            home_goals_scored_avg = 1.0
+            home_goals_conceded_avg = 1.0
+        
+        if len(away_matches) > 0:
+            away_goals_scored_avg = away_matches['away_score'].mean()
+            away_goals_conceded_avg = away_matches['home_score'].mean()
+        else:
+            away_goals_scored_avg = 1.0
+            away_goals_conceded_avg = 1.0
+        
+        # Store stats in dictionaries
+        team_win_rates[team] = win_rate
+        team_goal_scored_avg[team] = (home_goals_scored_avg + away_goals_scored_avg) / 2
+        team_goal_conceded_avg[team] = (home_goals_conceded_avg + away_goals_conceded_avg) / 2
+    
+    # Add team stats to the dataframe
+    data['home_win_rate'] = data['home_team'].map(team_win_rates).fillna(0.5)
+    data['away_win_rate'] = data['away_team'].map(team_win_rates).fillna(0.5)
+    data['home_avg_goals_scored'] = data['home_team'].map(team_goal_scored_avg).fillna(1.0)
+    data['home_avg_goals_conceded'] = data['home_team'].map(team_goal_conceded_avg).fillna(1.0)
+    data['away_avg_goals_scored'] = data['away_team'].map(team_goal_scored_avg).fillna(1.0)
+    data['away_avg_goals_conceded'] = data['away_team'].map(team_goal_conceded_avg).fillna(1.0)
+    
+    # Simplified h2h calculation - use a default value of 0.5 for all matches
+    data['h2h_win_rate'] = 0.5
+    
+    print("Feature engineering complete")
+    return data, label_encoders
+```
+
+This function:
+1. Creates a copy of the DataFrame to avoid warnings
+2. Sorts the data by date for chronological processing
+3. Uses LabelEncoder to convert categorical variables (teams, tournaments, countries) to numeric values
+4. Calculates team statistics for each unique team:
+   - Win rates based on home and away matches
+   - Average goals scored and conceded
+5. Maps these statistics to each match in the DataFrame
+6. Sets a simplified head-to-head win rate of 0.5 for all matches
+7. Returns the feature-engineered DataFrame and the label encoders
+
+### prepare_for_modeling Function
+
+```python
+def prepare_for_modeling(data):
+    print("Preparing data for modeling...")
+    
+    # Define features and target
+    features = [
+        'home_team_encoded', 'away_team_encoded', 'tournament_encoded', 'country_encoded',
+        'neutral', 'home_win_rate', 'away_win_rate', 'home_avg_goals_scored',
+        'home_avg_goals_conceded', 'away_avg_goals_scored', 'away_avg_goals_conceded',
+        'h2h_win_rate'
+    ]
+    
+    X = data[features]
+    
+    # Encode the target variable
+    le_result = LabelEncoder()
+    y = le_result.fit_transform(data['result'])
+    
+    # Split the data
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+    
+    print(f"Training set size: {X_train.shape[0]}, Test set size: {X_test.shape[0]}")
+    return X_train, X_test, y_train, y_test, le_result
+```
+
+This function:
+1. Defines the feature columns to be used for modeling
+2. Creates the feature matrix X
+3. Encodes the target variable (match result) using LabelEncoder
+4. Splits the data into training and testing sets (80% train, 20% test)
+5. Uses stratified sampling to maintain the same distribution of outcomes in both sets
+6. Returns the split datasets and the result encoder
+
+### train_model Function
+
+```python
+def train_model(X_train, y_train):
+    print("Training XGBoost model...")
+    
+    # Define the model
+    model = xgb.XGBClassifier(
+        n_estimators=100,
+        learning_rate=0.1,
+        max_depth=5,
+        random_state=42,
+        use_label_encoder=False,
+        eval_metric='mlogloss'
+    )
+    
+    # Train the model
+    model.fit(X_train, y_train)
+    
+    print("Model training complete")
+    return model
+```
+
+This function:
+1. Creates an XGBoost classifier with specified hyperparameters:
+   - n_estimators: Number of boosting rounds (100)
+   - learning_rate: Step size shrinkage to prevent overfitting (0.1)
+   - max_depth: Maximum depth of trees (5)
+   - random_state: For reproducibility (42)
+   - eval_metric: Multiclass log loss for evaluation
+2. Trains the model on the training data
+3. Returns the trained model
+
+### evaluate_model Function
+
+```python
+def evaluate_model(model, X_test, y_test, le_result):
+    print("Evaluating model...")
+    
+    # Make predictions
+    y_pred = model.predict(X_test)
+    
+    # Calculate accuracy
+    accuracy = accuracy_score(y_test, y_pred)
+    print(f"Accuracy: {accuracy:.4f}")
+    
+    # Print classification report
+    class_names = le_result.classes_
+    print("\nClassification Report:")
+    print(classification_report(y_test, y_pred, target_names=class_names))
+    
+    # Plot confusion matrix
+    cm = confusion_matrix(y_test, y_pred)
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names)
+    plt.xlabel('Predicted')
+    plt.ylabel('Actual')
+    plt.title('Confusion Matrix')
+    plt.savefig('confusion_matrix.png')
+    
+    # Plot feature importance
+    plt.figure(figsize=(12, 8))
+    xgb.plot_importance(model, max_num_features=12)
+    plt.title('Feature Importance')
+    plt.savefig('feature_importance.png')
+    
+    return accuracy
+```
+
+This function:
+1. Makes predictions on the test set
+2. Calculates and prints the accuracy score
+3. Generates and prints a classification report with precision, recall, and F1-score
+4. Creates and saves a confusion matrix visualization
+5. Creates and saves a feature importance plot
+6. Returns the accuracy score
+
+### predict_match Function
+
+```python
+def predict_match(model, home_team, away_team, tournament, neutral, label_encoders, le_result, data):
+    # Create a dataframe for the new match
+    try:
+        # Try to use the first country in the dataset as a default instead of 'Unknown'
+        default_country = data['country'].iloc[0]
+        country_encoded = label_encoders['country'].transform([default_country])[0]
+    except:
+        # If that fails, use the most common country
+        default_country = data['country'].mode()[0]
+        country_encoded = label_encoders['country'].transform([default_country])[0]
+    
+    new_match = pd.DataFrame({
+        'home_team_encoded': [label_encoders['home_team'].transform([home_team])[0]],
+        'away_team_encoded': [label_encoders['away_team'].transform([away_team])[0]],
+        'tournament_encoded': [label_encoders['tournament'].transform([tournament])[0]],
+        'country_encoded': [country_encoded],
+        'neutral': [neutral],
+    })
+    
+    # Get team stats from the data
+    # For home team
+    home_team_matches = data[data['home_team'] == home_team]
+    away_team_matches = data[data['away_team'] == away_team]
+    
+    # Calculate win rates
+    if len(home_team_matches) > 0 or len(data[data['away_team'] == home_team]) > 0:
+        home_wins = sum(home_team_matches['result'] == 'Home Win')
+        away_wins = sum(data[(data['away_team'] == home_team) & (data['result'] == 'Away Win')]['result'] == 'Away Win')
+        total_matches = len(home_team_matches) + len(data[data['away_team'] == home_team])
+        home_win_rate = (home_wins + away_wins) / total_matches if total_matches > 0 else 0.5
+    else:
+        home_win_rate = 0.5
+    
+    if len(away_team_matches) > 0 or len(data[data['home_team'] == away_team]) > 0:
+        away_wins = sum(away_team_matches['result'] == 'Away Win')
+        home_wins = sum(data[(data['home_team'] == away_team) & (data['result'] == 'Home Win')]['result'] == 'Home Win')
+        total_matches = len(away_team_matches) + len(data[data['home_team'] == away_team])
+        away_win_rate = (away_wins + home_wins) / total_matches if total_matches > 0 else 0.5
+    else:
+        away_win_rate = 0.5
+    
+    # Calculate goal averages
+    if len(home_team_matches) > 0:
+        home_avg_goals_scored = home_team_matches['home_score'].mean()
+        home_avg_goals_conceded = home_team_matches['away_score'].mean()
+    else:
+        home_avg_goals_scored = 1.0
+        home_avg_goals_conceded = 1.0
+    
+    if len(away_team_matches) > 0:
+        away_avg_goals_scored = away_team_matches['away_score'].mean()
+        away_avg_goals_conceded = away_team_matches['home_score'].mean()
+    else:
+        away_avg_goals_scored = 1.0
+        away_avg_goals_conceded = 1.0
+    
+    # Add stats to the new match
+    new_match['home_win_rate'] = home_win_rate
+    new_match['away_win_rate'] = away_win_rate
+    new_match['home_avg_goals_scored'] = home_avg_goals_scored
+    new_match['home_avg_goals_conceded'] = home_avg_goals_conceded
+    new_match['away_avg_goals_scored'] = away_avg_goals_scored
+    new_match['away_avg_goals_conceded'] = away_avg_goals_conceded
+    new_match['h2h_win_rate'] = 0.5  # Simplified approach
+    
+    # Make prediction
+    pred_proba = model.predict_proba(new_match)[0]
+    pred_class = model.predict(new_match)[0]
+    result = le_result.inverse_transform([pred_class])[0]
+    
+    # Return prediction and probabilities
+    return {
+        'predicted_result': result,
+        'probabilities': {
+            le_result.classes_[i]: f"{prob:.2f}" for i, prob in enumerate(pred_proba)
+        }
+    }
+```
+
+This function:
+1. Creates a DataFrame for a new match with encoded team, tournament, and country values
+2. Calculates team statistics for the specified teams:
+   - Win rates based on historical performance
+   - Average goals scored and conceded
+3. Adds these statistics to the new match DataFrame
+4. Uses the trained model to predict the match outcome and probabilities
+5. Returns a dictionary with the predicted result and probability scores for each outcome
+
+### main Function
+
+```python
+def main():
+    # Load and preprocess data - using a smaller sample for faster processing
+    sample_size = 10000  # Use last 10,000 matches for faster processing
+    df = load_data('international_results/results.csv', sample_size)
+    df = preprocess_data(df)
+    
+    # Engineer features
+    data, label_encoders = engineer_features(df)
+    
+    # Prepare for modeling
+    X_train, X_test, y_train, y_test, le_result = prepare_for_modeling(data)
+    
+    # Train the model
+    model = train_model(X_train, y_train)
+    
+    # Evaluate the model
+    evaluate_model(model, X_test, y_test, le_result)
+    
+    # Example prediction
+    print("\nExample prediction:")
+    prediction = predict_match(
+        model, 'Brazil', 'Argentina', 'Friendly', False, 
+        label_encoders, le_result, data
+    )
+    print(f"Predicted result: {prediction['predicted_result']}")
+    print("Probabilities:")
+    for result, prob in prediction['probabilities'].items():
+        print(f"  {result}: {prob}")
+    
+    return model, label_encoders, le_result, data
+```
+
+This function:
+1. Orchestrates the entire modeling process
+2. Loads and preprocesses the data with a sample size of 10,000 for faster processing
+3. Engineers features for the dataset
+4. Prepares the data for modeling
+5. Trains the XGBoost model
+6. Evaluates the model performance
+7. Makes an example prediction for Brazil vs Argentina
+8. Returns the model, encoders, and processed data
+
+## streamlit_app.py
+
+### Imports and Setup
+
+```python
+import streamlit as st
+import pandas as pd
+import numpy as np
+import pickle
+import os
+from football_predictor import predict_match, load_data, preprocess_data, engineer_features, prepare_for_modeling, train_model
+
+# Set page title and layout
+st.set_page_config(page_title="Football Match Predictor", layout="wide")
+
+# Title and description
+st.title("International Football Match Outcome Predictor")
+st.markdown("""...""") # Description text
+```
+
+These lines:
+1. Import necessary libraries for the web application
+2. Import functions from the football_predictor module
+3. Configure the Streamlit page layout and title
+4. Add a description of the application
+
+### get_model_and_encoders Function
+
+```python
+@st.cache_resource
+def get_model_and_encoders():
+    model_file = 'football_model.pkl'
+    encoders_file = 'label_encoders.pkl'
+    result_encoder_file = 'result_encoder.pkl'
+    data_file = 'processed_data.pkl'
+    
+    # Check if model files exist
+    if os.path.exists(model_file) and os.path.exists(encoders_file) and os.path.exists(result_encoder_file) and os.path.exists(data_file):
+        # Load existing model and encoders
+        with open(model_file, 'rb') as f:
+            model = pickle.load(f)
+        with open(encoders_file, 'rb') as f:
+            label_encoders = pickle.load(f)
+        with open(result_encoder_file, 'rb') as f:
+            le_result = pickle.load(f)
+        with open(data_file, 'rb') as f:
+            data = pickle.load(f)
+    else:
+        # Train new model
+        with st.spinner('Training model for the first time. This may take several minutes...'):
+            # Load and preprocess data
+            df = load_data('international_results/results.csv')
+            df = preprocess_data(df)
+            
+            # Engineer features
+            data, label_encoders = engineer_features(df)
+            
+            # Prepare for modeling
+            X_train, X_test, y_train, y_test, le_result = prepare_for_modeling(data)
+            
+            # Train the model
+            model = train_model(X_train, y_train)
+            
+            # Save model and encoders
+            with open(model_file, 'wb') as f:
+                pickle.dump(model, f)
+            with open(encoders_file, 'wb') as f:
+                pickle.dump(label_encoders, f)
+            with open(result_encoder_file, 'wb') as f:
+                pickle.dump(le_result, f)
+            with open(data_file, 'wb') as f:
+                pickle.dump(data, f)
+    
+    return model, label_encoders, le_result, data
+```
+
+This function:
+1. Is decorated with @st.cache_resource to cache the result and avoid recomputation
+2. Checks if model files already exist on disk
+3. If files exist, loads the model, encoders, and data from disk
+4. If files don't exist, trains a new model and saves it to disk
+5. Returns the model, encoders, and processed data
+
+### get_unique_values Function
+
+```python
+def get_unique_values(data):
+    teams = sorted(list(set(data['home_team'].unique()) | set(data['away_team'].unique())))
+    tournaments = sorted(data['tournament'].unique())
+    return teams, tournaments
+```
+
+This function:
+1. Extracts unique team names from both home_team and away_team columns
+2. Extracts unique tournament names
+3. Returns sorted lists of teams and tournaments
+
+### main Function
+
+```python
+def main():
+    # Load or train model
+    model, label_encoders, le_result, data = get_model_and_encoders()
+    
+    # Get unique teams and tournaments
+    teams, tournaments = get_unique_values(data)
+    
+    # Create sidebar for inputs
+    st.sidebar.header("Match Details")
+    
+    # Team selection
+    home_team = st.sidebar.selectbox("Home Team", teams)
+    away_team = st.sidebar.selectbox("Away Team", teams, index=1 if len(teams) > 1 else 0)
+    
+    # Tournament selection
+    tournament = st.sidebar.selectbox("Tournament", tournaments)
+    
+    # Neutral venue
+    neutral = st.sidebar.checkbox("Neutral Venue")
+    
+    # Predict button
+    if st.sidebar.button("Predict Match Outcome"):
+        # Check if teams are the same
+        if home_team == away_team:
+            st.error("Please select different teams for home and away.")
+        else:
+            # Make prediction
+            with st.spinner('Predicting match outcome...'):
+                prediction = predict_match(
+                    model, home_team, away_team, tournament, neutral, 
+                    label_encoders, le_result, data
+                )
+            
+            # Display prediction
+            st.subheader(f"Match: {home_team} vs {away_team}")
+            st.write(f"Tournament: {tournament}")
+            st.write(f"Venue: {'Neutral' if neutral else 'Home'}")
+            
+            # Create columns for visualization
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.subheader("Predicted Outcome")
+                st.markdown(f"<h1 style='text-align: center;'>{prediction['predicted_result']}</h1>", unsafe_allow_html=True)
+            
+            with col2:
+                st.subheader("Outcome Probabilities")
+                # Convert probabilities to float for visualization
+                probs = {k: float(v) for k, v in prediction['probabilities'].items()}
+                
+                # Create a DataFrame for the chart
+                prob_df = pd.DataFrame({
+                    'Outcome': list(probs.keys()),
+                    'Probability': list(probs.values())
+                })
+                
+                # Sort by probability
+                prob_df = prob_df.sort_values('Probability', ascending=False)
+                
+                # Display as bar chart
+                st.bar_chart(prob_df.set_index('Outcome'))
+            
+            # Display historical context
+            st.subheader("Historical Context")
+            
+            # Get head-to-head matches
+            h2h_matches = data[
+                ((data['home_team'] == home_team) & (data['away_team'] == away_team)) | 
+                ((data['home_team'] == away_team) & (data['away_team'] == home_team))
+            ].sort_values('date', ascending=False)
+            
+            if len(h2h_matches) > 0:
+                st.write(f"These teams have played {len(h2h_matches)} times before.")
+                
+                # Calculate stats
+                home_team_wins = sum(
+                    ((h2h_matches['home_team'] == home_team) & (h2h_matches['result'] == 'Home Win')) | 
+                    ((h2h_matches['away_team'] == home_team) & (h2h_matches['result'] == 'Away Win'))
+                )
+                away_team_wins = sum(
+                    ((h2h_matches['home_team'] == away_team) & (h2h_matches['result'] == 'Home Win')) | 
+                    ((h2h_matches['away_team'] == away_team) & (h2h_matches['result'] == 'Away Win'))
+                )
+                draws = len(h2h_matches) - home_team_wins - away_team_wins
+                
+                st.write(f"{home_team} wins: {home_team_wins}")
+                st.write(f"{away_team} wins: {away_team_wins}")
+                st.write(f"Draws: {draws}")
+                
+                # Show recent matches
+                st.write("Recent matches:")
+                recent_matches = h2h_matches.head(5)[['date', 'home_team', 'away_team', 'home_score', 'away_score', 'tournament']]
+                recent_matches['date'] = recent_matches['date'].dt.date
+                st.dataframe(recent_matches)
+            else:
+                st.write("These teams have never played each other before.")
+    
+    # Add information about the model
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("About the Model")
+    st.sidebar.info("""...""") # Model information
+```
+
+This function:
+1. Loads or trains the model using get_model_and_encoders
+2. Gets unique teams and tournaments from the data
+3. Creates a sidebar with input controls:
+   - Home team selection
+   - Away team selection
+   - Tournament selection
+   - Neutral venue checkbox
+   - Predict button
+4. When the predict button is clicked:
+   - Validates that different teams are selected
+   - Makes a prediction using the predict_match function
+   - Displays the prediction result and probabilities
+   - Shows historical context between the teams
+   - Calculates head-to-head statistics
+   - Displays recent matches between the teams
+5. Adds information about the model in the sidebar
+
+## Core Machine Learning Concepts
+
+### Label Encoding
+
+Label encoding is used to convert categorical variables (like team names, tournaments, and countries) into numeric values that can be used by the machine learning model. Each unique category is assigned a unique integer.
+
+### Feature Engineering
+
+Feature engineering involves creating new features from the raw data to improve model performance. In this project, features include:
+- Encoded categorical variables
+- Team performance metrics (win rates, goal averages)
+- Match context (neutral venue)
+- Head-to-head statistics
+
+### Train-Test Split
+
+The data is split into training (80%) and testing (20%) sets to evaluate the model's performance on unseen data. Stratified sampling ensures that the distribution of outcomes is the same in both sets.
+
+### XGBoost Classifier
+
+XGBoost is a gradient boosting algorithm that builds an ensemble of decision trees sequentially, with each tree correcting the errors of the previous ones. It's effective for classification tasks like predicting match outcomes.
+
+### Model Evaluation
+
+The model is evaluated using:
+- Accuracy: The proportion of correctly predicted outcomes
+- Precision: The proportion of positive identifications that were actually correct
+- Recall: The proportion of actual positives that were identified correctly
+- F1-score: The harmonic mean of precision and recall
+- Confusion matrix: A table showing true vs. predicted outcomes
+
+### Streamlit Web Application
+
+Streamlit is used to create an interactive web interface for the prediction model. It provides:
+- Input controls for selecting teams and match details
+- Visualization of prediction results
+- Display of historical context and statistics
+- Caching to improve performance
+
+## Conclusion
+
+This Football Prediction System demonstrates the application of machine learning to sports prediction. It uses historical match data to train an XGBoost model that can predict the outcomes of future matches with reasonable accuracy. The Streamlit web interface makes it easy for users to interact with the model and get predictions for specific match-ups.
